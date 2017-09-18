@@ -6,79 +6,57 @@
 #include <sys/mman.h>
 #include <string.h>
 
-#include <linux/ion.h>
+#include <ion.h>
 
-#define ION_DEVICE "/dev/ion" 
-#define MAX_BUFFERS 10
+#define ION_DEVICE "/dev/ion"
+#define MAX_HEAPS 8
+#define MAX_LEN 1024*16
 
 int main(int argc, char ** argv)
 {
 	int ion_fd = 0;
-	int err = 0;
-	int heap = 0;
-	int i = 0;
+	int err, i;
+	struct ion_heap_data heaps_data[MAX_HEAPS];
+	struct ion_heap_query query;
 
-	struct ion_allocation_data handle_data[MAX_BUFFERS];
-	struct ion_fd_data fd_data[MAX_BUFFERS];
-	void *buffer[MAX_BUFFERS];
-	
 	printf("Open ION memory manager\n");
 	ion_fd = open(ION_DEVICE, O_RDONLY);
 	if(!ion_fd) {
-		printf("Failed to opn ion device - %s", strerror(errno));
+		printf("Failed to open ION device - %s\n", strerror(errno));
 		return -errno;
-	}	
-	
-	if(argc == 2) {
-		heap = atoi(argv[1]);
 	}
 
-	for (i=0; i < MAX_BUFFERS; i++) {
-
-		/* Fill ioctl data to get a buffer */	
-		handle_data[i].len = 4096;	
-		handle_data[i].align = 0;
-		/* get a buffer from cma_zone_x */
-		handle_data[i].flags = 1 << heap;
-	
-		printf("request buffer allocation from heap %d\n", heap);
-		err = ioctl(ion_fd, ION_IOC_ALLOC, &handle_data[i]);
-		if(err) {
-			printf("ION_IOC_ALLOC failed - %s\n", strerror(errno));
-			goto out;
-		}
-
-		/* now get fd from handle */
-		fd_data[i].handle = handle_data[i].handle;
-
-		printf("get fd from handle %x\n", fd_data[i].handle);
-		err = ioctl(ion_fd, ION_IOC_SHARE, &fd_data[i]);
-		if(err) {
-			printf("ION_IOC_SHARE failed - %s\n", strerror(errno));
-			goto err;
-		}	
-
-		printf("mmap fd %d\n", fd_data[i].fd);
-		buffer[i] = mmap(0, handle_data[i].len, PROT_READ|PROT_WRITE, MAP_SHARED, fd_data[i].fd, 0);
-
-		if(buffer[i] == MAP_FAILED) {
-			printf("mmap failed - %s\n", strerror(errno));
-			err = -errno;
-			goto err;
-		}
-
-		memset(buffer[i], 0xFF, handle_data[i].len);
-
-		printf("ION test OK heap %d handle %x fd %d\n", heap, handle_data[i].handle, fd_data[i].fd);
-		sleep(2);
+	memset(&query, 0, sizeof(query));
+	query.cnt = MAX_HEAPS;
+	query.heaps = (__u64)&heaps_data;
+	err = ioctl(ion_fd, ION_IOC_HEAP_QUERY, &query);
+	if (err) {
+		printf("Can't get ION heaps data %s\n", strerror(errno));
+		goto out;
 	}
-	printf("wait 10 seconds before release the buffers\n");
-	sleep(10);
-err:
-	for ( ; i > 0; i--) {
-		printf("release buffer\n");
-		ioctl(ion_fd, ION_IOC_FREE, &handle_data[i]);
+
+	printf("Heap name \t\ttype \tid \talloc \tmmap\n");
+	for (i = 0; i < query.cnt; i++) {
+		int fd;
+		struct ion_allocation_data alloc;
+		void *buffer = NULL;
+
+		memset(&alloc, 0, sizeof(alloc));
+		alloc.len = MAX_LEN;
+		alloc.heap_id_mask = heaps_data[i].heap_id;
+		err = ioctl(ion_fd, ION_IOC_ALLOC, &alloc);
+		if (!err)
+			buffer = mmap(0, MAX_LEN, PROT_READ|PROT_WRITE, MAP_SHARED, alloc.fd, 0);
+
+		printf("%s \t\t%d \t%d \t%s \t%s\n",
+			heaps_data[i].name,
+			heaps_data[i].type ,
+			heaps_data[i].heap_id,
+			err ? "KO" : "OK",
+			buffer ? "OK": "KO");
+		close(fd);
 	}
+
 out:
 	printf("close %s\n", ION_DEVICE);
 	close(ion_fd);
